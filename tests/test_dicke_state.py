@@ -5,7 +5,7 @@ import pytest
 import cirq
 from src.noise_models import sample_benchmark_environment
 from src.dicke_state import create_dicke_state, create_dicke_state_adaptive
-from src.scoring import test_circuit, create_dicke_statevector
+from src.scoring import test_circuit as verify_circuit, create_dicke_statevector
 
 
 def test_create_dicke_statevector():
@@ -38,11 +38,11 @@ def test_create_dicke_state_fidelity(n_qubits, excitations):
     assert len(qubits) == n_qubits
     assert len(circuit) <= 1750
     # Verify exact state preparation
-    test_circuit(circuit, excitations, qubits)
+    verify_circuit(circuit, excitations, qubits)
 
 
 def test_create_dicke_state_adaptive():
     """Verify adaptive circuit generation on baseline parameters."""
     circuit, qubits = create_dicke_state_adaptive(num_qubits=3, num_excitations=1)
     assert len(qubits) == 3
-    test_circuit(circuit, 1, qubits)
+    verify_circuit(circuit, 1, qubits)

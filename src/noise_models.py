@@ -9,6 +9,33 @@ import cirq
 import cirq_google
 
 
+class _DeviceMetadata:
+    def __init__(self, qubits: list[cirq.GridQubit], pairs: list[tuple[cirq.GridQubit, cirq.GridQubit]]):
+        self.qubit_set = frozenset(qubits)
+        self.qubit_pairs = frozenset(pairs)
+
+
+class _FallbackWillowDevice:
+    """Mock device for local testing when Willow105 is not in public cirq_google."""
+    def __init__(self):
+        qubits = [cirq.GridQubit(r, c) for r in range(11) for c in range(10)][:105]
+        pairs = []
+        q_set = set(qubits)
+        for q in qubits:
+            for dr, dc in [(0, 1), (1, 0)]:
+                nbr = cirq.GridQubit(q.row + dr, q.col + dc)
+                if nbr in q_set:
+                    pairs.append((q, nbr))
+        self.metadata = _DeviceMetadata(qubits, pairs)
+
+
+def get_willow_device():
+    """Retrieve Willow105 device object or local fallback."""
+    if hasattr(cirq_google, "Willow105"):
+        return getattr(cirq_google, "Willow105")
+    return _FallbackWillowDevice()
+
+
 def pick_single_qubit_dropouts(
     dropout_rate: float,
     rng: Optional[np.random.Generator] = None,
@@ -16,7 +43,8 @@ def pick_single_qubit_dropouts(
     """Pick qubits on Willow105 to be defective."""
     if rng is None:
         rng = np.random.default_rng()
-    all_qubits = np.array(list(cirq_google.Willow105.metadata.qubit_set))
+    device = get_willow_device()
+    all_qubits = np.array(list(device.metadata.qubit_set))
     is_dropout = rng.random(len(all_qubits)) < dropout_rate
     return set(all_qubits[is_dropout])
 
@@ -31,7 +59,8 @@ def generate_qubit_error_rates(
     """Generate lognormal single-qubit error rates."""
     if rng is None:
         rng = np.random.default_rng()
-    all_qubits = np.array(list(cirq_google.Willow105.metadata.qubit_set))
+    device = get_willow_device()
+    all_qubits = np.array(list(device.metadata.qubit_set))
     is_working = np.array([q not in dropouts for q in all_qubits])
     working_qubits = all_qubits[is_working]
     error_rate = rng.lognormal(np.log(median), spread, len(working_qubits))
@@ -54,7 +83,8 @@ def generate_two_qubit_pauli_error_rates(
     if single_qubit_dropouts is None:
         single_qubit_dropouts = set()
 
-    all_pairs = np.array(list(cirq_google.Willow105.metadata.qubit_pairs))
+    device = get_willow_device()
+    all_pairs = np.array(list(device.metadata.qubit_pairs))
     no_qubit_dropouts = np.array(
         [np.all([q not in single_qubit_dropouts for q in pair]) for pair in all_pairs]
     )

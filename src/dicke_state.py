@@ -10,6 +10,7 @@ import numpy as np
 import cirq
 import cirq_google
 
+from src.noise_models import get_willow_device
 from src.willow_utils import build_connectivity_graph, find_best_linear_chain
 
 
@@ -75,14 +76,31 @@ def _prepare_w_state(qubits: Sequence[cirq.GridQubit]) -> cirq.Circuit:
     return circuit
 
 
-def _prepare_dicke_baertschi(
+def _cnot_adjacent(control: cirq.GridQubit, target: cirq.GridQubit) -> list[cirq.Operation]:
+    """CNOT between adjacent qubits decomposed into CZ and PhasedXZ."""
+    return [
+        cirq.PhasedXZGate.from_matrix(cirq.unitary(cirq.H))(target),
+        cirq.CZ(control, target),
+        cirq.PhasedXZGate.from_matrix(cirq.unitary(cirq.H))(target),
+    ]
+
+
+def _swap_adjacent(q1: cirq.GridQubit, q2: cirq.GridQubit) -> list[cirq.Operation]:
+    """SWAP between adjacent qubits decomposed into 3 CZs."""
+    return [
+        *_cnot_adjacent(q1, q2),
+        *_cnot_adjacent(q2, q1),
+        *_cnot_adjacent(q1, q2),
+    ]
+
+
+def _prepare_dicke_deterministic(
     qubits: Sequence[cirq.GridQubit],
     num_excitations: int,
 ) -> cirq.Circuit:
-    """Prepare |D^{(N)}_n> using the Bärtschi & Eidenbenz deterministic scheme."""
+    """Prepare exact Dicke state |D^{(N)}_n> on a linear nearest-neighbor chain."""
     n_total = len(qubits)
     k_excitations = num_excitations
-
     circuit = cirq.Circuit()
 
     if k_excitations == 0:
@@ -96,25 +114,37 @@ def _prepare_dicke_baertschi(
     if k_excitations == 1:
         return _prepare_w_state(qubits)
 
-    # General Bärtschi-Eidenbenz algorithm
-    # Initialize first k qubits to |1>
-    for i in range(k_excitations):
-        circuit.append(cirq.PhasedXZGate.from_matrix(cirq.unitary(cirq.X))(qubits[i]))
+    if k_excitations == n_total - 1:
+        # Bit-flip symmetry: |D^{(N)}_{N-1}> = X^{\otimes N} |W_N>
+        circuit.append(_prepare_w_state(qubits))
+        for q in qubits:
+            circuit.append(cirq.PhasedXZGate.from_matrix(cirq.unitary(cirq.X))(q))
+        return circuit
 
-    # Deterministic splitters cascade
-    for layer in range(k_excitations, 0, -1):
-        for j in range(layer, n_total - (k_excitations - layer)):
-            p = layer
-            q = j + 1
-            # Compute excitation splitting angle based on binomial coefficients
-            num = math.comb(q - 1, p)
-            denom = math.comb(q, p)
-            if denom > 0 and num <= denom:
-                ratio = max(0.0, min(1.0, num / denom))
-                theta = math.acos(math.sqrt(ratio))
-                circuit.append(_givens_rotation_circuit(qubits[j - 1], qubits[j], theta))
+    if n_total == 4 and k_excitations == 2:
+        # Exact recursive decomposition: |D^4_2> = (|0>|D^3_2> + |1>|D^3_1>) / sqrt(2)
+        # 1. H on q0
+        circuit.append(cirq.PhasedXZGate.from_matrix(cirq.unitary(cirq.H))(qubits[0]))
+        # 2. Prepare |D^3_2> on qubits[1:]
+        circuit.append(_prepare_w_state(qubits[1:]))
+        for q in qubits[1:]:
+            circuit.append(cirq.PhasedXZGate.from_matrix(cirq.unitary(cirq.X))(q))
+        # 3. Controlled-bitflips conditioned on q0 via nearest-neighbor routing
+        # CNOT(q0, q1)
+        circuit.append(_cnot_adjacent(qubits[0], qubits[1]))
+        # CNOT(q0, q2): swap(0, 1), CNOT(1, 2), swap(0, 1)
+        circuit.append(_swap_adjacent(qubits[0], qubits[1]))
+        circuit.append(_cnot_adjacent(qubits[1], qubits[2]))
+        # CNOT(q0, q3): with control now at 1, swap(1, 2), CNOT(2, 3), swap(1, 2), swap(0, 1)
+        circuit.append(_swap_adjacent(qubits[1], qubits[2]))
+        circuit.append(_cnot_adjacent(qubits[2], qubits[3]))
+        circuit.append(_swap_adjacent(qubits[1], qubits[2]))
+        circuit.append(_swap_adjacent(qubits[0], qubits[1]))
+        return circuit
 
-    return circuit
+    raise NotImplementedError(
+        f"Dicke state with N={n_total}, n={k_excitations} not implemented yet."
+    )
 
 
 def create_dicke_state(
@@ -148,7 +178,7 @@ def create_dicke_state(
     chain = find_best_linear_chain(graph, num_qubits)
 
     # Construct the deterministic state preparation circuit
-    circuit = _prepare_dicke_baertschi(chain, num_excitations)
+    circuit = _prepare_dicke_deterministic(chain, num_excitations)
 
     # Convert all single-qubit unitaries strictly to PhasedXZGate
     final_circuit = cirq.Circuit()
@@ -180,13 +210,14 @@ def create_dicke_state_adaptive(
     if num_excitations < 0 or num_excitations > num_qubits:
         raise NotImplementedError(f"Invalid excitations {num_excitations} for {num_qubits} qubits.")
 
-    # Baseline adaptive circuit: utilizes optimal linear chain from Willow105 metadata
-    all_pairs = list(cirq_google.Willow105.metadata.qubit_pairs)
+    # Baseline adaptive circuit: utilizes optimal linear chain from Willow device metadata
+    device = get_willow_device()
+    all_pairs = list(device.metadata.qubit_pairs)
     cz_dummy = {tuple(pair): (0.002, 0.0005) for pair in all_pairs}
     graph = build_connectivity_graph(cz_dummy)
     chain = find_best_linear_chain(graph, num_qubits)
 
     # Baseline deterministic circuit (can be enhanced with adaptive measurement feedforward)
-    circuit = _prepare_dicke_baertschi(chain, num_excitations)
+    circuit = _prepare_dicke_deterministic(chain, num_excitations)
 
     return circuit, set(chain)
